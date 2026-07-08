@@ -59,6 +59,9 @@ Environment variables (in `.mcp.json` `env`):
 
 Dates are `YYYY-MM-DD`; `fields` defaults to all; `codes` defaults to all; `frequency` ∈ daily/weekly/monthly/annual.
 
+All four data tools also accept **`conditions`** — a list of field filters, e.g.
+`[{"field":"Clsprc","op":">","value":"100"}]`. Operators: `>` `>=` `<` `<=` `=` `!=` `like` `not like` `is null` `not is null`; multiple conditions are AND-joined by default (`"relation":"or"` per item to OR).
+
 ### Example prompts
 - "Check the CSMAR connection" → `csmar_status`
 - "Search for stock trading tables" → `csmar_search("stock")`
@@ -72,6 +75,10 @@ Dates are `YYYY-MM-DD`; `fields` defaults to all; `codes` defaults to all; `freq
 - A single query returns at most **200,000 records**; the time span per query is capped by frequency (e.g. daily ≤ 2 years). Narrow the range if it errors.
 - Identical queries may be rate-limited briefly; transient slowness/timeouts are retried automatically.
 - Only single-table queries (Data Query) are covered; cross-table query is not implemented.
+
+**Deliberate non-goals**
+- *Resolving a table by its physical name (e.g. `TRD_Dalyr`) cold*: CSMAR's search index does not contain physical names and there is no name→id endpoint, so pass a `table_id` (from `csmar_search`/`csmar_list_tables`) or a table display name. A physical name works only after that table has been accessed once in the session.
+- *A `get_financial_data` convenience tool*: financial figures span many tables with consolidation / parent-only / report-type nuances that a naive `indicators=[…]` wrapper would silently get wrong. Use `csmar_search` → `csmar_query` (with `fields`/`conditions`) instead, which is explicit and correct.
 
 ### How it works
 - Auth: `POST /api/csmar-main/automaticLogin` (self-generated `signCode` UUID + IP) → token.
@@ -137,6 +144,9 @@ Dates are `YYYY-MM-DD`; `fields` defaults to all; `codes` defaults to all; `freq
 
 日期格式 `YYYY-MM-DD`；`fields` 缺省=全部；`codes` 缺省=全部；`frequency` ∈ daily/weekly/monthly/annual。
 
+四个取数工具都支持 **`conditions`**（字段筛选），例：`[{"field":"Clsprc","op":">","value":"100"}]`。
+运算符：`>` `>=` `<` `<=` `=` `!=` `like` `not like` `is null` `not is null`；多条件默认 AND（单条加 `"relation":"or"` 可 OR）。
+
 ### 典型用法（对 Claude 说）
 - “确认 CSMAR 能连吗” → `csmar_status`
 - “搜股票交易相关的表” → `csmar_search("stock")`
@@ -150,6 +160,10 @@ Dates are `YYYY-MM-DD`; `fields` defaults to all; `codes` defaults to all; `freq
 - 单次查询最多 **20 万条**；时间跨度上限因频率而异（如日频 ≤ 2 年）。超限就缩小范围。
 - 相同查询短时间内可能被限流；偶发慢/超时已内置重试。
 - 仅覆盖单表查询（Data Query）；跨表查询未实现。
+
+**有意不做的两点**
+- *冷启动用物理表名（如 `TRD_Dalyr`）解析表*：CSMAR 搜索索引不含物理名，也没有「按名查 id」的端点，所以请传 `table_id`（来自 `csmar_search`/`csmar_list_tables`）或表显示名；物理名仅在该表本会话内被访问过后才可用。
+- *`get_financial_data` 便捷工具*：财务数据跨多张表，且有合并/母公司、报表类型等口径差异，`indicators=[…]` 式的封装很容易给出「看似对实则错」的数字。改用 `csmar_search` → `csmar_query`（配 `fields`/`conditions`）更明确也更可靠。
 
 ### 实现说明
 参见上方 English → How it works。核心：IP 换 token → 搜索/浏览/预览（HTTP JSON）→ 下载走 `saveOutline`+`pack`（异步）+ WebSocket 拿文件路径 → 从 `file.csmar.com` 取 zip（内含 xlsx，前 3 行为 字段名/描述/单位）。

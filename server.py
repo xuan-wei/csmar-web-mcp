@@ -50,6 +50,13 @@ PREVIEW_CAP = 200                                 # 网页 preview 单次上限
 STOCK_TABLES = {"daily": 3596, "weekly": 3597, "monthly": 3598, "annual": 3599}
 COMPANY_TABLE = 3593                              # TRD_Co 公司基本信息
 
+# 条件运算符 -> CSMAR character id（从网页前端逆向）
+OP_MAP = {
+    ">": "0", ">=": "1", "<": "2", "<=": "3", "=": "4", "==": "4",
+    "!=": "5", "<>": "5", "like": "6", "not like": "7",
+    "is null": "8", "isnull": "8", "not is null": "9", "notnull": "9", "is not null": "9",
+}
+
 
 def _clean(x):
     return (x or "").replace("<span class='font-red'>", "").replace("</span>", "")
@@ -214,8 +221,30 @@ class Csmar:
             f["isChecked"] = "1"
         return sel
 
+    def _build_conditions(self, meta, conditions):
+        """把 [{field, op, value, relation?}] 转成 CSMAR 的 filterCondition DTO 列表。"""
+        if not conditions:
+            return []
+        by_field = {f["field"].lower(): f for f in meta["fieldInfoVos"]}
+        by_title = {(f.get("fieldTitle") or "").lower(): f for f in meta["fieldInfoVos"]}
+        out = []
+        for cnd in conditions:
+            field = cnd.get("field") or cnd.get("column")
+            op = str(cnd.get("op") or cnd.get("operator") or "=").strip().lower()
+            ch = OP_MAP.get(op)
+            if ch is None:
+                raise RuntimeError(f"不支持的运算符 '{op}'，可用: > >= < <= = != like 'not like' 'is null' 'not is null'")
+            fld = by_field.get(str(field).lower()) or by_title.get(str(field).lower())
+            if not fld:
+                raise RuntimeError(f"条件字段 '{field}' 不存在，见 csmar_list_fields")
+            out.append({"field": fld["field"], "character": ch,
+                        "condition": str(cnd.get("value", "")),
+                        "name": fld.get("fieldTitle") or fld["field"],
+                        "conditionRelation": str(cnd.get("relation") or "and").lower()})
+        return out
+
     # ---------- 取数核心 ----------
-    def cache_condition(self, table_id, start, end, fields, codes, count_only=False):
+    def cache_condition(self, table_id, start, end, fields, codes, conditions=None):
         """构造并提交 cacheCondition，返回 (cache_id, meta, selected_fields)。"""
         meta = self.table_meta(table_id)
         db = self.resolve_db(table_id)
@@ -228,7 +257,7 @@ class Csmar:
             "fileOutType": FILEOUT_XLSX, "tableName": meta["tableName"],
             "tableNamePhy": meta["tableNamePhy"], "codeSetField": code_f, "timeSetField": time_f,
             "id": table_id, "startDate": start, "endDate": end,
-            "fieldInfoDtos": sel, "filterConditionDtos": [],
+            "fieldInfoDtos": sel, "filterConditionDtos": self._build_conditions(meta, conditions),
             "databaseName": db["databaseName"], "databaseId": db["databaseId"],
             "seriesName": db["seriesName"], "frequency": "0", "showCount": "1",
         }
@@ -236,16 +265,16 @@ class Csmar:
                              body=body, timeout=90, retries=2)
         return cache_id, meta, sel
 
-    def preview_rows(self, table_id, start, end, fields=None, codes=None):
+    def preview_rows(self, table_id, start, end, fields=None, codes=None, conditions=None):
         """cacheCondition + preview，返回 (dataCount, rows(≤200), selected_fields, meta)。"""
-        cache_id, meta, sel = self.cache_condition(table_id, start, end, fields, codes)
+        cache_id, meta, sel = self.cache_condition(table_id, start, end, fields, codes, conditions)
         pv = self._req("GET", f"/api/csmar-single/single/preview/{cache_id}", timeout=90, retries=2)
         rows = pv.get("previewDatas") or []
         for r in rows:
             r.pop("updateid", None)
         return pv.get("dataCount"), rows, sel, meta
 
-    def download_file(self, table_id, start, end, fields=None, codes=None):
+    def download_file(self, table_id, start, end, fields=None, codes=None, conditions=None):
         """saveOutline → pack → WS → 下 zip 解出 xlsx，返回 (xlsx_bytes, dataCount, meta)。"""
         meta = self.table_meta(table_id)
         time_f, code_f = self._time_code_fields(meta["fieldInfoVos"])
@@ -256,7 +285,8 @@ class Csmar:
             "fieldStr": field_ids, "fileOutType": FILEOUT_XLSX,
             "tableName": meta["tableName"], "tableNamePhy": meta["tableNamePhy"],
             "planName": "", "mail": "", "codeSetField": code_f, "timeSetField": time_f,
-            "conditionDtos": [], "startTime": start, "endTime": end,
+            "conditionDtos": self._build_conditions(meta, conditions),
+            "startTime": start, "endTime": end,
             "estimateTime": 1, "tableId": table_id, "downloadType": "0", "frequency": "0"})
         pack_id = self._req("POST", "/api/csmar-main/singleData/pack", body={
             "codeSetField": code_f, "mail": "", "outlineId": oid,
@@ -427,23 +457,27 @@ def csmar_list_fields(table: str) -> dict:
 # ==================== 取数类工具 ====================
 @mcp.tool()
 def csmar_query_count(table: str, start_date: str, end_date: str,
-                      codes: list[str] | None = None) -> dict:
-    """统计满足条件的记录总数（不取数据）。table 可传 table_id 或表名。"""
+                      codes: list[str] | None = None,
+                      conditions: list[dict] | None = None) -> dict:
+    """统计满足条件的记录总数（不取数据）。table 可传 table_id 或表名。
+    conditions 例：[{"field":"Clsprc","op":">","value":"100"}]，op 支持 > >= < <= = != like。"""
     tid = csmar.resolve_table(table)
-    cache_id, meta, _ = csmar.cache_condition(tid, start_date, end_date, None, codes)
+    cache_id, meta, _ = csmar.cache_condition(tid, start_date, end_date, None, codes, conditions)
     pv = csmar._req("GET", f"/api/csmar-single/single/preview/{cache_id}", timeout=90, retries=2)
     return {"table": meta["tableName"], "total": pv.get("dataCount")}
 
 
 @mcp.tool()
 def csmar_preview(table: str, start_date: str, end_date: str,
-                  fields: list[str] | None = None, codes: list[str] | None = None) -> dict:
+                  fields: list[str] | None = None, codes: list[str] | None = None,
+                  conditions: list[dict] | None = None) -> dict:
     """
     取数预览：直接返回 JSON 行（每次≤200 行）。table 可传 table_id 或表名。
     日期 YYYY-MM-DD；fields 缺省=全部；codes 缺省=全部代码。
+    conditions 例：[{"field":"Clsprc","op":">","value":"100","relation":"and"}]。
     """
     tid = csmar.resolve_table(table)
-    total, rows, sel, meta = csmar.preview_rows(tid, start_date, end_date, fields, codes)
+    total, rows, sel, meta = csmar.preview_rows(tid, start_date, end_date, fields, codes, conditions)
     return {"table": meta["tableName"], "total": total, "returned": len(rows),
             "note": "预览上限 200 行；要更多用 csmar_query 或 csmar_download",
             "columns": [{"field": f["field"], "title": f.get("fieldTitle")} for f in sel],
@@ -453,20 +487,21 @@ def csmar_preview(table: str, start_date: str, end_date: str,
 @mcp.tool()
 def csmar_query(table: str, start_date: str, end_date: str,
                 fields: list[str] | None = None, codes: list[str] | None = None,
-                limit: int = 200) -> dict:
+                conditions: list[dict] | None = None, limit: int = 200) -> dict:
     """
     通用取数，返回 JSON 行。limit≤200 走快速预览；limit>200 自动后台打包下载再读取（较慢）。
-    table 可传 table_id 或表名。注意 CSMAR 单次≤20万条、时间跨度上限因表频率而异。
+    table 可传 table_id 或表名。conditions 例：[{"field":"Clsprc","op":">=","value":"100"}]。
+    注意 CSMAR 单次≤20万条、时间跨度上限因表频率而异。
     """
     tid = csmar.resolve_table(table)
     if limit <= PREVIEW_CAP:
-        total, rows, sel, meta = csmar.preview_rows(tid, start_date, end_date, fields, codes)
+        total, rows, sel, meta = csmar.preview_rows(tid, start_date, end_date, fields, codes, conditions)
         rows = rows[:limit]
         return {"table": meta["tableName"], "total": total, "returned": len(rows),
                 "via": "preview",
                 "columns": [{"field": f["field"], "title": f.get("fieldTitle")} for f in sel],
                 "rows": rows}
-    xlsx_bytes, total, meta = csmar.download_file(tid, start_date, end_date, fields, codes)
+    xlsx_bytes, total, meta = csmar.download_file(tid, start_date, end_date, fields, codes, conditions)
     rows = _xlsx_to_rows(xlsx_bytes, limit, _text_cols(meta))
     return {"table": meta["tableName"], "total": total, "returned": len(rows),
             "via": "download", "rows": rows}
@@ -475,15 +510,17 @@ def csmar_query(table: str, start_date: str, end_date: str,
 @mcp.tool()
 def csmar_download(table: str, start_date: str, end_date: str,
                    fields: list[str] | None = None, codes: list[str] | None = None,
+                   conditions: list[dict] | None = None,
                    out_dir: str | None = None, as_csv: bool = False) -> dict:
     """
     批量下载完整数据，打包后存本地。默认 xlsx；as_csv=True 另存 CSV。返回本地路径与记录数。
-    table 可传 table_id 或表名。注意 CSMAR 单次≤20万条、时间跨度上限因表频率而异。
+    table 可传 table_id 或表名。conditions 例：[{"field":"Clsprc","op":">","value":"100"}]。
+    注意 CSMAR 单次≤20万条、时间跨度上限因表频率而异。
     """
     tid = csmar.resolve_table(table)
     out_dir = out_dir or DEFAULT_OUT
     os.makedirs(out_dir, exist_ok=True)
-    xlsx_bytes, total, meta = csmar.download_file(tid, start_date, end_date, fields, codes)
+    xlsx_bytes, total, meta = csmar.download_file(tid, start_date, end_date, fields, codes, conditions)
     base = f"{meta['tableNamePhy']}_{start_date}_{end_date}".replace(":", "")
     xlsx_path = os.path.join(out_dir, base + ".xlsx")
     with open(xlsx_path, "wb") as fh:
