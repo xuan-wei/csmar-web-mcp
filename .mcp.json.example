@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "csmar": {
+      "type": "stdio",
+      "command": "/absolute/path/to/your/python",
+      "args": ["/absolute/path/to/server.py"],
+      "env": {
+        "CSMAR_LANG": "1",
+        "CSMAR_OUT_DIR": "/absolute/path/to/download/dir"
+      }
+    }
+  }
+}

@@ -1,0 +1,20 @@
+# Local machine-specific MCP config (copy from .mcp.json.example)
+.mcp.json
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# CSMAR downloads / data
+*.xlsx
+*.csv
+*.zip
+csmar-log.log
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
